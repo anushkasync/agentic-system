@@ -61,6 +61,11 @@ def wrapper(total_time_allowed=20, max_attempts=3):
                 timeout=request_timeout,
             )
 
+            choice = completion.choices[0]
+            if choice.finish_reason == "length":
+                # In production, trigger a continuation loop or fallback model here
+                raise ValueError("LLM Failure: Generation truncated by token capacity limitations.")
+
             content = completion.choices[0].message.content
             result = Response.model_validate_json(content)
             print(result.model_dump_json())
