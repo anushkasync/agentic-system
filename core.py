@@ -28,14 +28,13 @@ class Response(BaseModel):
 
 def wrapper(total_time_allowed=20, max_attempts=3):
     max_output_tokens = 256
-    max_output_tokens_cap = 1024
 
     start = time.monotonic()
 
     max_tokens = max_output_tokens
 
     for attempt in range(max_attempts):
-        
+
         try:
             messages = [{"role": "user", "content":"List exactly 3 colors"}]
 
