@@ -27,47 +27,108 @@ class Response(BaseModel):
     colors: list[str]
 
 def wrapper(total_time_allowed=20, max_attempts=3):
+    max_output_tokens = 256
+    max_output_tokens_cap = 1024
+
     start = time.monotonic()
 
+    max_tokens = max_output_tokens
+
     for attempt in range(max_attempts):
-        remaining = total_time_allowed - (time.monotonic() - start)
-
-        if remaining <= 0:
-            print("OVERALL BUDGET EXPIRED BEFORE REQUEST")
-            raise TimeoutError("Total time budget exceeded")
-
-        request_timeout = httpx.Timeout(
-            timeout=min(10.0, remaining),
-            connect=min(2.0, remaining),
-            write=min(3.0, remaining),
-            read=min(10.0, remaining),
-            pool=min(0.5, remaining),
-        )
-
+        
         try:
-            completion = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=[
-                    {"role": "user", "content": "List exactly 3 colors."}
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "Response",
-                        "schema": Response.model_json_schema(),
-                        "strict": True,
-                    },
-                },
-                timeout=request_timeout,
-            )
+            messages = [{"role": "user", "content":"List exactly 3 colors"}]
 
-            choice = completion.choices[0]
-            if choice.finish_reason == "length":
-                # In production, trigger a continuation loop or fallback model here
-                raise ValueError("LLM Failure: Generation truncated by token capacity limitations.")
+            content_parts = []
+            max_continuations = 2
+            completed = False
 
-            content = completion.choices[0].message.content
+            for i in range(max_continuations+1):
+                remaining = total_time_allowed - (
+                    time.monotonic() - start
+                )
+                if remaining <= 0:
+                    raise TimeoutError("Total time budget exceeded")
+                
+                request_timeout = httpx.Timeout(
+                    timeout=min(10.0, remaining),
+                    connect=min(2.0, remaining),
+                    write=min(3.0, remaining),
+                    read=min(10.0, remaining),
+                    pool=min(0.5, remaining),
+                )
+
+                request_args = {
+                    "model": "openai/gpt-oss-20b",
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "timeout": request_timeout,
+                }
+
+                if i == 0:
+                    request_args["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "Response",
+                            "schema": Response.model_json_schema(),
+                            "strict": True,
+                        },
+                    }
+
+                completion = client.chat.completions.create(
+                    **request_args
+                )
+
+                choice = completion.choices[0]
+
+                if choice.finish_reason == "content_filter":
+                    raise ValueError(
+                        "LLM Failure: Output blocked by content filter."
+                    )
+
+                partial_content = choice.message.content or ""
+
+                # Save the generated text
+                content_parts.append(partial_content)
+
+                # Generation completed successfully
+                if choice.finish_reason != "length":
+                    completed = True
+                    break
+
+                # No continuation attempts remaining
+                if i == max_continuations:
+                    break
+
+                # Preserve the partial assistant response
+                messages.append({
+                    "role": "assistant",
+                    "content": partial_content,
+                })
+
+                # Ask the model to continue
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response was cut off. "
+                        "Continue exactly where it ended. "
+                        "Output only the remaining JSON text. "
+                        "Do not repeat the existing content."
+                    ),
+                })
+
+            if not completed:
+                raise ValueError(
+                    "LLM Failure: Response remained truncated "
+                    "after continuation attempts."
+                )
+
+            # Combine all generated fragments
+            content = "".join(content_parts)
+
+            # Validate the reconstructed JSON
             result = Response.model_validate_json(content)
+
             print(result.model_dump_json())
             return result
 
